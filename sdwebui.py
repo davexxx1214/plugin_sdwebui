@@ -5,7 +5,6 @@ import json
 import os
 
 import webuiapi
-import langid
 from bridge.bridge import Bridge
 import plugins
 from bridge.context import ContextType
@@ -14,13 +13,20 @@ from common.log import logger
 from config import conf
 from plugins import *
 
-
-@plugins.register(name="sdwebui", desc="利用stable-diffusion webui来画图", version="2.1", author="lanvent")
+@plugins.register(
+    name="sdwebui", 
+    desire_priority=0,
+    hidden=True,
+    desc="利用stable-diffusion webui来画图", 
+    version="2.1", 
+    author="lanvent"
+    )
 class SDWebUI(Plugin):
     def __init__(self):
         super().__init__()
         curdir = os.path.dirname(__file__)
-        config_path = os.path.join(curdir, "config.json")
+        config_path = os.path.join(curdir, "config.json")   
+        config = None
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
@@ -29,7 +35,9 @@ class SDWebUI(Plugin):
                 self.default_params = defaults["params"]
                 self.default_options = defaults["options"]
                 self.start_args = config["start"]
+                self.imagine_prefix = config["imagine_prefix"]
                 self.api = webuiapi.WebUIApi(**self.start_args)
+                self.api.set_auth('easyar', '123456')
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
             logger.info("[SD] inited")
         except Exception as e:
@@ -41,10 +49,13 @@ class SDWebUI(Plugin):
     
     def on_handle_context(self, e_context: EventContext):
 
-        if e_context['context'].type != ContextType.IMAGE_CREATE:
+        if e_context["context"].type not in [
+            ContextType.TEXT
+        ]:
             return
-        channel = e_context['channel']
-        if ReplyType.IMAGE in channel.NOT_SUPPORT_REPLYTYPE:
+        
+        clists = e_context["context"].content.split(maxsplit=3)
+        if not clists[0].startswith(self.imagine_prefix):
             return
 
         logger.debug("[SD] on_handle_context. content: %s" %e_context['context'].content)
@@ -52,17 +63,27 @@ class SDWebUI(Plugin):
         logger.info("[SD] image_query={}".format(e_context['context'].content))
         reply = Reply()
         try:
-            content = e_context['context'].content[:]
+            content = e_context['context'].content[:].replace(self.imagine_prefix, "", 1)
             # 解析用户输入 如"横版 高清 二次元:cat"
-            if ":" in content:
-                keywords, prompt = content.split(":", 1)
+            
+            index1 = 9999
+            if("<" in content):
+                index1 = content.find("<")
+
+            index2 = 9999
+            if("(" in content):
+                index2 = content.find("(")
+
+
+            if ":" in content and content.index(":") < index1 and content.index(":") < index2:
+                keywords, prompt = content.split(":", 1)        
             else:
-                keywords = content
-                prompt = ""
+                keywords = ''
+                prompt = content
 
             keywords = keywords.split()
             unused_keywords = []
-            if "help" in keywords or "帮助" in keywords:
+            if "帮助" in content:
                 reply.type = ReplyType.INFO
                 reply.content = self.get_help_text(verbose = True)
             else:
@@ -84,6 +105,8 @@ class SDWebUI(Plugin):
                         logger.info("[SD] keyword not matched: %s" % keyword)
                 
                 params = {**self.default_params, **rule_params}
+                logger.info("[SD] before rule: params={}".format(params))
+
                 options = {**self.default_options, **rule_options}
                 params["prompt"] = params.get("prompt", "")
                 if unused_keywords:
@@ -92,19 +115,21 @@ class SDWebUI(Plugin):
                     else:
                         prompt = ', '.join(unused_keywords)
                 if prompt:
-                    lang = langid.classify(prompt)[0]
-                    if lang != "en":
-                        logger.info("[SD] translate prompt from {} to en".format(lang))
-                        try:
-                            prompt = Bridge().fetch_translate(prompt, to_lang= "en")
-                        except Exception as e:
-                            logger.info("[SD] translate failed: {}".format(e))
-                        logger.info("[SD] translated prompt={}".format(prompt))
                     params["prompt"] += f", {prompt}"
                 if len(options) > 0:
                     logger.info("[SD] cover options={}".format(options))
                     self.api.set_options(options)
+
+                # override_settings = {}
+                # override_settings["filter_nsfw"] = True
+
+                # override_payload = {
+                #     "override_settings": override_settings
+                # }
+
+                # params.update(override_payload)
                 logger.info("[SD] params={}".format(params))
+
                 result = self.api.txt2img(
                     **params
                 )
@@ -130,13 +155,14 @@ class SDWebUI(Plugin):
         if not verbose:
             return help_text
         
-        help_text += f"使用方法:\n使用\"{trigger}[关键词1] [关键词2]...:提示语\"的格式作画，如\"{trigger}横版 高清:cat\"\n"
+        help_text += f"使用方法:\n使用\"{trigger}[风格]:提示语\"的格式作画，如\"{trigger}film:cat\"\n"
+        help_text += "如果没有指定风格，则默认使用万象熔炉AnythingV5作为checkpoint.\n"
         help_text += "目前可用关键词：\n"
         for rule in self.rules:
             keywords = [f"[{keyword}]" for keyword in rule['keywords']]
             help_text += f"{','.join(keywords)}"
             if "desc" in rule:
-                help_text += f"-{rule['desc']}\n"
+                help_text += f"-{rule['desc']}\n\n"
             else:
                 help_text += "\n"
         return help_text
